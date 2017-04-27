@@ -6,7 +6,6 @@ from collections import Counter
 import pandas as pd
 import time
 import sys
-reload(sys)
 sys.setdefaultencoding('utf8')
 import warnings
 warnings.filterwarnings('ignore')
