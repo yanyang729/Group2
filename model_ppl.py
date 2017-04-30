@@ -6,11 +6,11 @@ from collections import Counter
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.pipeline import Pipeline
 from helper import normalize_corpus
-import  gensim
+import gensim
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.model_selection import RandomizedSearchCV,cross_val_score,StratifiedShuffleSplit,train_test_split
-from sklearn.metrics import recall_score,accuracy_score
+from sklearn.metrics import recall_score,accuracy_score,make_scorer
 import numpy as np
 from tqdm import tqdm
 from gensim import models,corpora
@@ -23,7 +23,7 @@ class ParsedDataTransformer(BaseEstimator,TransformerMixin):
     """
     transform form parsed xml file into topn df
     df.content is a string sentence which is not cleaned
-    df.tags is a list of lists only have top n tags
+    df.tags is a list of SINGLE TAG only have top n tags
     """
     def __init__(self, topn_tags):
         self.topn_tags = topn_tags
@@ -48,6 +48,27 @@ class ParsedDataTransformer(BaseEstimator,TransformerMixin):
         return rslt.reset_index(drop=True)
 
 
+class DropRowWithMultipleTags(BaseEstimator,TransformerMixin):
+    """
+    to reduce overlap, we drop those question with multiple top N tags
+    """
+    def __init__(self):
+        pass
+
+    def fit(self,X,y=None):
+        return self
+
+    def transform(self,X,y=None):
+        mask = []
+        for row in X.tags:
+            if len(row) == 1:
+                mask.append(True)
+            else:
+                mask.append(False)
+        return X[mask]
+
+
+
 class ContentCleaner(BaseEstimator,TransformerMixin):
     """
     using helper function to clean the content text
@@ -64,12 +85,40 @@ class ContentCleaner(BaseEstimator,TransformerMixin):
         return pd.DataFrame({'content':noramalized_docs,'tags':X.tags})
 
 
+class BOWVector(BaseEstimator,TransformerMixin):
+    """
+    to bag of words vector
+    """
+    def __init__(self,topn_tags):
+        self.topn_tags = topn_tags
+
+    def fit(self,X,y=None):
+        return self
+
+    def transform(self,X,y=None):
+        content = ' '.join(list(X.content))
+        uniq_words = set(content.split())
+        word_to_int = { word:i for i,word in enumerate(uniq_words)}
+        int_to_word = {i:word for i,word in enumerate(uniq_words)}
+        content_vecs = []
+        for sentence in X.content:
+            vecs = np.zeros(len(uniq_words))
+            for word in sentence.split():
+                vecs[word_to_int[word]] += 1
+            for tag in topn_tags:
+                vecs[word_to_int[word]] *= 77  # sorry, it's magic number
+            content_vecs.append(vecs)
+        return np.array(content_vecs)
+
+
+
 class ExtractTfidfAveVec(BaseEstimator, TransformerMixin):
     """
     get the word to vector model, tfidf model, use them to get the sentence vector
     """
-    def __init__(self,vec_len):
+    def __init__(self,vec_len,topn_tags):
         self.vec_len = vec_len
+        self.topn_tags = topn_tags
 
     def fit(self, X, y=None):
         self.corpus = list(X.content.values.flatten())
@@ -96,6 +145,9 @@ class ExtractTfidfAveVec(BaseEstimator, TransformerMixin):
         word_tfidfs = [tfidf_features[0, vocab.get(word)] if vocab.get(word) else 0 for word in words]
         word_tfidf_map = {word: tfidf_val for word, tfidf_val in zip(words, word_tfidfs)}
 
+        #add more main language weight
+        for tag in self.topn_tags:
+            word_tfidf_map[tag] = 100*word_tfidf_map.get(tag,np.zeros(self.vec_len))
         return word_tfidf_map
 
     def ave_weighted_tfidf(self, tokenized_list):
@@ -145,16 +197,18 @@ class LDATransformer(BaseEstimator, TransformerMixin):
         return pd.concat((pd.DataFrame(dict_values), X.iloc[:, 1]), axis=1)
 
 
-def xgb_random_search(x_train,y_train,num_iter=10):
+def xgb_random_search(x_train,y_train,num_iter=5):
     param_distribs = {
-        'max_depth': [3, 4],
-        'learning_rate': [0.01, 0.05, 0.1, 0.5],
-        'n_estimators': list(range(100,1000,100)),
-        'colsample_bytree': [0.5,0.7,0.9],
+        'estimator__max_depth': [3, 4],
+        'estimator__learning_rate': [0.01, 0.05, 0.1, 0.5],
+        'estimator__n_estimators': list(range(100,1000,100)),
+        'estimator__colsample_bytree': [0.5,0.7,0.9],
     }
 
-    gbm = xgb.XGBClassifier()
-    rnd_search = RandomizedSearchCV(gbm, param_distribs, n_iter=num_iter, cv=5, scoring='recall')
+    gbm = OneVsRestClassifier(xgb.XGBClassifier(),n_jobs=-1)
+    def score_func(y, y_pred, **kwargs):
+        return recall_score(y,y_pred,average='macro')
+    rnd_search = RandomizedSearchCV(gbm, param_distribs, n_iter=num_iter, cv=5,scoring=make_scorer(score_func))
     rnd_search.fit(x_train, y_train)
 
     cvres = rnd_search.cv_results_
@@ -171,9 +225,16 @@ def svm_random_search(x_train, y_train, num_iter=10):
         'estimator__kernel':[ 'linear', 'poly', 'rbf', 'sigmoid'],
         'estimator__C' : list(np.linspace(0.01,1,20)),
         "estimator__degree": [1, 2, 3, 4],
+        "estimator__class_weight":['balanced'],
+        "estimator__probability":[True]
     }
-    ovsr = OneVsRestClassifier(SVC(),n_jobs=4)
-    rnd_search = RandomizedSearchCV(ovsr, param_distribs, n_iter=num_iter, cv=5)
+
+    ovsr = OneVsRestClassifier(SVC(),n_jobs=-1)
+
+    def score_func(y, y_pred, **kwargs):
+        return recall_score(y,y_pred,average='macro')
+
+    rnd_search = RandomizedSearchCV(ovsr, param_distribs, n_iter=num_iter, cv=5,scoring=make_scorer(score_func))
     rnd_search.fit(x_train, y_train)
 
     cvres = rnd_search.cv_results_
@@ -198,40 +259,73 @@ class TargetBinerizer(BaseEstimator,TransformerMixin):
     def transform(self,X,y=None):
         mlb = MultiLabelBinarizer().fit(X.tags)
         y = mlb.transform(X.tags)
-        return y
+        return y,mlb
 
+def bool_to_int(array):
+    rslt = []
+    for b in array:
+        rslt.append(int(b))
+    return rslt
 
 if __name__ == '__main__':
 
-    df = pd.read_csv('./data/processed/stack_ds_4_9_2017 .csv', quotechar='|', sep=',', header=None)
+    df = pd.read_csv('./data/processed/stack_ds_4_9_2017 .csv', quotechar='|', sep=',', header=None )
     topn_tags = ['javascript', 'java', 'android', 'php', 'python', 'c#', 'html', 'jquery', 'ios', 'css']
 
 
     ppl_X = Pipeline([
         ('transformer',ParsedDataTransformer(topn_tags)),
+        ('droprowwithgtonetag',DropRowWithMultipleTags()),
         ('textCleaner',ContentCleaner()),
-        ('doc2vecTFIDFtransformer',ExtractTfidfAveVec(vec_len=15))
+        # ('doc2vecTFIDFtransformer',ExtractTfidfAveVec(vec_len=15,topn_tags=topn_tags)),
+        ('BOWVector',BOWVector(topn_tags=topn_tags))
     ])
 
     ppl_y = Pipeline([
         ('transformer',ParsedDataTransformer(topn_tags)),
+        ('droprowwithgtonetag', DropRowWithMultipleTags()),
         ('targetBinerizer',TargetBinerizer())
     ])
 
 
     X = ppl_X.fit_transform(df)
-    y = ppl_y.fit_transform(df)
+    y,mlb = ppl_y.fit_transform(df)
 
-    x_train, x_test, y_train, y_test = train_test_split(X, y, test_size = 0.2, random_state = 42)
+    x_train, x_test, y_train, y_test = train_test_split(X, y, test_size = 0.2, random_state = 123)
 
-    _, best_para = svm_random_search(x_train,y_train)
+    # SVM
+    # _, best_para = svm_random_search(x_train,y_train)
+    #
+    # ovsr = OneVsRestClassifier(SVC(
+    #     C=best_para['estimator__C'],
+    #     kernel=best_para['estimator__kernel'],
+    #     degree=best_para['estimator__degree'],
+    #     class_weight=best_para['estimator__class_weight'],
+    #     probability=best_para["estimator__probability"]
+    # ), n_jobs=-1).fit(x_train,y_train)
+    #
+    # preds = ovsr.predict_proba(x_test)
+    # preds = np.array([ bool_to_int(y == np.max(y)) for y in preds])
+    #
+    # print mlb.inverse_transform(preds)
+    # print 'recall score: {}'.format(recall_score(y_test, preds, average='macro'))
+    # print 'accuracy score: {}'.format(accuracy_score(y_test, preds))
 
-    ovsr = OneVsRestClassifier(SVC(
-        C=best_para['estimator__C'],
-        kernel=best_para['estimator__kernel'],
-        degree=best_para['estimator__degree']
-    ), n_jobs=4).fit(x_train,y_train)
+    # XGB
+    # _, best_para = xgb_random_search(x_train, y_train,num_iter=3)
 
-    preds = ovsr.predict(x_test)
-    print 'recall score: {}'.format(recall_score(y_test, preds, average='weighted'))
+    ovsr = OneVsRestClassifier(xgb.XGBClassifier(silent=1),n_jobs=-1).fit(x_train,y_train)
+    preds = ovsr.predict_proba(x_test)
+    preds = np.array([bool_to_int(y == np.max(y)) for y in preds])
+
+    print mlb.inverse_transform(preds)
+    print 'recall score: {}'.format(recall_score(y_test, preds, average='macro'))
     print 'accuracy score: {}'.format(accuracy_score(y_test, preds))
+
+
+# ===================result=======================
+"""
+recall score: 0.642362746282
+accuracy score: 0.750636132316
+"""
+
