@@ -2,7 +2,7 @@ from helper import *
 from sklearn.base import BaseEstimator,TransformerMixin
 import pandas as pd
 import itertools
-from collections import Counter
+from collections import Counter, OrderedDict
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.pipeline import Pipeline
 from helper import normalize_corpus
@@ -16,6 +16,7 @@ from tqdm import tqdm
 from gensim import models,corpora
 from sklearn.svm import SVC
 import xgboost as xgb
+import math
 
 
 
@@ -98,18 +99,105 @@ class BOWVector(BaseEstimator,TransformerMixin):
     def transform(self,X,y=None):
         content = ' '.join(list(X.content))
         uniq_words = set(content.split())
-        word_to_int = { word:i for i,word in enumerate(uniq_words)}
-        int_to_word = {i:word for i,word in enumerate(uniq_words)}
+        termsTagRatioList = self.TermOccuranceRatioFinder(X,self.topn_tags)
+        word_to_int = { word:i for i,word in enumerate(termsTagRatioList)}
+        # int_to_word = {i:word for i,word in enumerate(termsTagRatioList)}
         content_vecs = []
         for sentence in X.content:
-            vecs = np.zeros(len(uniq_words))
+            vecs = np.zeros(len(termsTagRatioList))
             for word in sentence.split():
-                vecs[word_to_int[word]] += 1
-            for tag in topn_tags:
-                vecs[word_to_int[word]] *= 77  # sorry, it's magic number
+                if word in termsTagRatioList:
+                    vecs[word_to_int[word]] += 1
+                    if word in topn_tags:
+                        vecs[word_to_int[word]] *= 77
             content_vecs.append(vecs)
         return np.array(content_vecs)
 
+    @classmethod
+    def TermOccuranceRatioFinder(cls,X,topn_tags):
+        positive_counts = Counter()
+        negative_counts = Counter()
+        total_counts = Counter()
+
+        tf_unique_words = []
+        for tag_id in range(len(topn_tags)):
+            for i in range(len(X.content)):
+                try:
+                    if (X.tags[i][0] == topn_tags[tag_id]):
+                        for word in X.content[i].split():
+                            positive_counts[word] += 1
+                            total_counts[word] += 1
+                    else:
+                        for word in X.content[i].split():
+                            negative_counts[word] += 1
+                            total_counts[word] += 1
+                except:
+                    pass
+
+            print positive_counts.most_common()
+
+            pos_neg_ratios = Counter()
+
+            # Calculate the ratios of positive and negative uses of the most common words
+            # Consider words to be "common" if they've been used at least 100 times
+            for term, cnt in list(total_counts.most_common()):
+                if (cnt > 20):
+                    pos_neg_ratio = positive_counts[term] / float(negative_counts[term] + 1)
+                    pos_neg_ratios[term] = pos_neg_ratio
+
+            # Convert ratios to logs
+            for word, ratio in pos_neg_ratios.most_common():
+                if (ratio > 0):
+                    pos_neg_ratios[word] = np.log(ratio)
+                else:
+                    pos_neg_ratios[word] = -np.log((1 / (ratio + 0.01)))
+
+            print pos_neg_ratios.most_common()
+
+            min_doc_frequency = -4
+            counting = 0
+            for term_index,term_ratio_tuple in enumerate(pos_neg_ratios.most_common()):
+                term = term_ratio_tuple[0]
+                ratio = term_ratio_tuple[1]
+                if ratio > min_doc_frequency:
+                # if counting < 500:
+                    if term not in tf_unique_words:
+                        tf_unique_words.append(term)
+                counting += 1
+
+        return tf_unique_words
+
+            # Please Ignore the comments - To be deleted while review
+            # final_term_list = []
+            # header_list = ['Unique_Words'] + topntags
+            # final_term_list.append(header_list)
+            # tag_ratio_list = OrderedDict()
+            # for i, tag in enumerate(topn_tags):
+            #     top_words_list = []
+            #     word_ratio_list = OrderedDict()
+            #     for index, word in enumerate(uniqueWords):
+            #         co_with_tag = 0
+            #         co_without_tag = 0
+            #         counting=0
+            #         for value in X.content:
+            #             try:
+            #                 if tag == X.tags[counting][0]:
+            #                     if word in value[counting].split():
+            #                         co_with_tag += 1
+            #                     else:
+            #                         co_without_tag += 1
+            #             except:
+            #                 pass
+            #             counting += 1
+            #         div_value = co_with_tag/(co_without_tag+0.00001)
+            #         if div_value > 0:
+            #             to_ratio = float(math.log(div_value))
+            #         else:
+            #             to_ratio = 0
+            #         word_ratio_list[word] = to_ratio
+            #     top_words_list = sorted(word_ratio_list)[0:n_words]
+            #     tag_ratio_list[tag]=top_words_list
+            # return tag_ratio_list
 
 
 class ExtractTfidfAveVec(BaseEstimator, TransformerMixin):
