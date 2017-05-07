@@ -1,0 +1,86 @@
+import json
+import requests
+import datetime
+import HTMLParser
+import pandas as pd
+import re
+
+import dateutil.parser
+import datetime
+
+# parse body
+def clean_body(s):
+    code_match = re.compile('<pre>(.*?)</pre>', re.MULTILINE | re.DOTALL)
+    link_match = re.compile('<a href="http://.*?".*?>(.*?)</a>', re.MULTILINE | re.DOTALL)
+    img_match = re.compile('<img(.*?)/>', re.MULTILINE | re.DOTALL)
+    tag_match = re.compile('<[^>]*>', re.MULTILINE | re.DOTALL)
+
+    # remove code? link? img? tag?
+    for match_str in code_match.findall(s):
+        s = code_match.sub("", s)
+
+    links = link_match.findall(s)
+
+    s = re.sub(" +", " ", tag_match.sub('', s)).replace("\n", "")
+
+    for link in links:
+        if link.lower().startswith("http://"):
+            s = s.replace(link, '')
+
+    return s
+
+class DataScraper:
+    BASE_URL = "https://api.stackexchange.com/2.2/questions?page={}&pagesize=100&fromdate={}&todate={}&order=desc&sort=creation&site=stackoverflow&filter=withbody"
+    def __init__(self,size=10000, from_date=1451606400, to_date=1483228800):
+        self.data_size=size
+        self.fromDate=from_date
+        self.toDate=to_date
+
+    @staticmethod
+    def load_vals(page=1, from_date=1451606400, to_date=1483228800):
+        url = DataScraper.BASE_URL.format(page, from_date, to_date)
+        json_result = json.loads(requests.get(url).content)
+        has_more = json_result["has_more"]
+        if len(json_result["items"]) < 1:
+            return False, None
+        final_reults = []
+        json_result = HTMLParser.HTMLParser().unescape(json_result["items"])
+        final_reults = []
+        for item in json_result:
+            title = item["title"]
+            time = datetime.datetime.fromtimestamp(item["creation_date"]).strftime('%b %d, %Y')
+            body = clean_body(item["body"])
+            tags = item["tags"]
+            final_reults.append([title, body, time, tags])
+        return has_more, final_reults
+
+    @staticmethod
+    def load_sets(size=10000, from_date=1451606400, to_date=1483228800):
+        for_size = size / 100
+        if size % 100 == 0:
+            for_size -= 1
+        df_set = []
+        for page in range(for_size+1):
+            has_more, set100 = DataScraper.load_vals(page + 1, from_date, to_date)
+            if not set100:
+                break
+
+            df_set += set100
+            if not has_more:
+                break
+        return df_set
+
+    def scrape(self):
+        dataset=DataScraper.load_sets(self.data_size,self.fromDate,self.toDate)
+        df=pd.DataFrame(dataset,columns=["title", "body","time","tags"])
+        df=df[["title", "body","tags"]]
+        df.to_csv("./data/processed/scape_data.csv",header=False,index=False,encoding="utf8")
+        return df
+
+if __name__ == '__main__':
+    start="2016-01-01"
+    end="2017-01-01"
+    convertDT=lambda dt:int((dateutil.parser.parse(dt) - datetime.datetime(1970, 1, 1)).total_seconds())
+    scraper=DataScraper(size=100,from_date=convertDT(start),to_date=convertDT(end))
+    scraper.scrape()
+
