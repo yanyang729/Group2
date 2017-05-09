@@ -1,14 +1,13 @@
-from helper import *
 from sklearn.base import BaseEstimator,TransformerMixin
 import pandas as pd
 import itertools
 from collections import Counter
-from sklearn.preprocessing import MultiLabelBinarizer
+from sklearn.preprocessing import MultiLabelBinarizer,LabelEncoder
 from sklearn.pipeline import Pipeline
 from helper import normalize_corpus
 import gensim
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.multiclass import OneVsRestClassifier
+from sklearn.multiclass import OneVsRestClassifier, OneVsOneClassifier
 from sklearn.model_selection import RandomizedSearchCV,cross_val_score,StratifiedShuffleSplit,train_test_split
 from sklearn.metrics import recall_score,accuracy_score,make_scorer
 import numpy as np
@@ -16,7 +15,6 @@ from tqdm import tqdm
 from gensim import models,corpora
 from sklearn.svm import SVC
 import xgboost as xgb
-
 
 
 class ParsedDataTransformer(BaseEstimator,TransformerMixin):
@@ -173,6 +171,9 @@ class ExtractTfidfAveVec(BaseEstimator, TransformerMixin):
 
 
 class LDATransformer(BaseEstimator, TransformerMixin):
+    """
+    Using LDA to generate N numeric features, which is also the topics.
+    """
     def __init__(self, num_topics, passes):
         self.num_topics = num_topics
         self.passes = passes
@@ -197,7 +198,58 @@ class LDATransformer(BaseEstimator, TransformerMixin):
         return pd.concat((pd.DataFrame(dict_values), X.iloc[:, 1]), axis=1)
 
 
+
+class TargetBinerizer(BaseEstimator,TransformerMixin):
+    """
+    transform the target into one-hot like vector
+    """
+    def __init__(self):
+        pass
+
+    def fit(self,X,y=None):
+        return self
+
+    def transform(self,X,y=None):
+        mlb = MultiLabelBinarizer().fit(X.tags)
+        y = mlb.transform(X.tags)
+        return y,mlb
+
+
+class TargetEncoder(BaseEstimator,TransformerMixin):
+    """
+    transform the target into one-hot like vector
+    """
+    def __init__(self):
+        pass
+
+    def fit(self,X,y=None):
+        return self
+
+    def transform(self,X,y=None):
+        # mlb = ().fit(X.tags)
+        # y = mlb.transform(X.tags)
+        le = LabelEncoder().fit(X.tags)
+        y = le.transform(X.tags)
+        return y,le
+
+
+# just a helper function to change an array of bools to int.
+def bool_to_int(array):
+    rslt = []
+    for b in array:
+        rslt.append(int(b))
+    return rslt
+
+
+# used for finding best parameter set
 def xgb_random_search(x_train,y_train,num_iter=5):
+    """
+    search for best para set using xgb
+    :param x_train: X
+    :param y_train: y
+    :param num_iter: search how many times
+    :return: highest score, a list of highest paras set
+    """
     param_distribs = {
         'estimator__max_depth': [3, 4],
         'estimator__learning_rate': [0.01, 0.05, 0.1, 0.5],
@@ -221,6 +273,13 @@ def xgb_random_search(x_train,y_train,num_iter=5):
 
 
 def svm_random_search(x_train, y_train, num_iter=10):
+    """
+    search for best para set using svm
+    :param x_train: X
+    :param y_train: y
+    :param num_iter:  search how many times
+    :return: highest score, a list of highest paras set
+    """
     param_distribs = {
         'estimator__kernel':[ 'linear', 'poly', 'rbf', 'sigmoid'],
         'estimator__C' : list(np.linspace(0.01,1,20)),
@@ -246,33 +305,15 @@ def svm_random_search(x_train, y_train, num_iter=10):
     return highest_score,highest_paras
 
 
-class TargetBinerizer(BaseEstimator,TransformerMixin):
-    """
-    transform the target into one-hot like vector
-    """
-    def __init__(self):
-        pass
-
-    def fit(self,X,y=None):
-        return self
-
-    def transform(self,X,y=None):
-        mlb = MultiLabelBinarizer().fit(X.tags)
-        y = mlb.transform(X.tags)
-        return y,mlb
-
-def bool_to_int(array):
-    rslt = []
-    for b in array:
-        rslt.append(int(b))
-    return rslt
 
 if __name__ == '__main__':
 
+    # read input data and define some parameters
     df = pd.read_csv('./data/processed/stack_ds_4_9_2017 .csv', quotechar='|', sep=',', header=None )
     topn_tags = ['javascript', 'java', 'android', 'php', 'python', 'c#', 'html', 'jquery', 'ios', 'css']
+    which_model = 'xgb'
 
-
+    # chose the best pipeline to use to transform X,y
     ppl_X = Pipeline([
         ('transformer',ParsedDataTransformer(topn_tags)),
         ('droprowwithgtonetag',DropRowWithMultipleTags()),
@@ -285,42 +326,48 @@ if __name__ == '__main__':
         ('transformer',ParsedDataTransformer(topn_tags)),
         ('droprowwithgtonetag', DropRowWithMultipleTags()),
         ('targetBinerizer',TargetBinerizer())
+        # ('labelencoder',TargetEncoder())
     ])
 
-
+    # get traning data
     X = ppl_X.fit_transform(df)
-    y,mlb = ppl_y.fit_transform(df)
+    y, mlb = ppl_y.fit_transform(df)
+    x_train, x_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=123)
 
-    x_train, x_test, y_train, y_test = train_test_split(X, y, test_size = 0.2, random_state = 123)
+    # chose model to train
+    if which_model == 'svm':
+        _, best_para = svm_random_search(x_train,y_train)
 
-    # SVM
-    # _, best_para = svm_random_search(x_train,y_train)
-    #
-    # ovsr = OneVsRestClassifier(SVC(
-    #     C=best_para['estimator__C'],
-    #     kernel=best_para['estimator__kernel'],
-    #     degree=best_para['estimator__degree'],
-    #     class_weight=best_para['estimator__class_weight'],
-    #     probability=best_para["estimator__probability"]
-    # ), n_jobs=-1).fit(x_train,y_train)
-    #
-    # preds = ovsr.predict_proba(x_test)
-    # preds = np.array([ bool_to_int(y == np.max(y)) for y in preds])
-    #
-    # print mlb.inverse_transform(preds)
-    # print 'recall score: {}'.format(recall_score(y_test, preds, average='macro'))
-    # print 'accuracy score: {}'.format(accuracy_score(y_test, preds))
+        ovsr = OneVsRestClassifier(SVC(
+            C=best_para['estimator__C'],
+            kernel=best_para['estimator__kernel'],
+            degree=best_para['estimator__degree'],
+            class_weight=best_para['estimator__class_weight'],
+            probability=best_para["estimator__probability"]
+        ), n_jobs=-1).fit(x_train,y_train)
 
-    # XGB
-    # _, best_para = xgb_random_search(x_train, y_train,num_iter=3)
+        preds = ovsr.predict_proba(x_test)
+        preds = np.array([ bool_to_int(y == np.max(y)) for y in preds])
 
-    ovsr = OneVsRestClassifier(xgb.XGBClassifier(silent=1),n_jobs=-1).fit(x_train,y_train)
-    preds = ovsr.predict_proba(x_test)
-    preds = np.array([bool_to_int(y == np.max(y)) for y in preds])
+        print mlb.inverse_transform(preds)
+        print 'recall score: {}'.format(recall_score(y_test, preds, average='macro'))
+        print 'accuracy score: {}'.format(accuracy_score(y_test, preds))
 
-    print mlb.inverse_transform(preds)
-    print 'recall score: {}'.format(recall_score(y_test, preds, average='macro'))
-    print 'accuracy score: {}'.format(accuracy_score(y_test, preds))
+
+    if which_model == 'xgb':
+        _, best_para = xgb_random_search(x_train, y_train,num_iter=3)
+
+        ovsr = OneVsRestClassifier(xgb.XGBClassifier(silent=1),n_jobs=-1).fit(x_train,y_train)
+        preds = ovsr.predict_proba(x_test)
+        preds = np.array([bool_to_int(y == np.max(y)) for y in preds])
+
+        ovsr = OneVsOneClassifier(xgb.XGBClassifier(silent=1),n_jobs=-1).fit(x_train,y_train)
+        preds = ovsr.predict(x_test)
+        preds = np.array([bool_to_int(y == np.max(y)) for y in preds])
+
+        print mlb.inverse_transform(preds)
+        print 'recall score: {}'.format(recall_score(y_test, preds, average='macro'))
+        print 'accuracy score: {}'.format(accuracy_score(y_test, preds))
 
 
 # ===================result=======================

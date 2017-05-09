@@ -1,13 +1,3 @@
-import pandas as pd
-import numpy as np
-import sys
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.pipeline import Pipeline
-from sklearn.model_selection import train_test_split
-from sklearn.feature_extraction.text import TfidfVectorizer
-from collections import Counter
-import gensim
-from tqdm import tqdm
 import warnings
 warnings.filterwarnings('ignore')
 from tqdm import tqdm
@@ -16,10 +6,11 @@ import nltk
 import string
 from nltk.stem import WordNetLemmatizer
 import unicodedata
-stopword_list = nltk.corpus.stopwords.words('english')
-wnl = WordNetLemmatizer()
+from pattern.en import tag
+from nltk.corpus import wordnet as wn
 
 
+# a map of contractions we may have and want to expand
 CONTRACTION_MAP = {
 "ain't": "is not",
 "aren't": "are not",
@@ -146,11 +137,22 @@ CONTRACTION_MAP = {
 "you've": "you have"
 }
 
+
 def strip_accents(s):
+    """
+    strip accents
+    :param : a sentence
+    :return : stripped sentences
+    """
     return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
 
 
 def tokenize_text(text):
+    """
+    tokenize text
+    :param text: a sentence
+    :return: a list of tokenized text
+    """
     if isinstance(text, unicode):
         text = strip_accents(text)
     text = text.encode('ascii', 'ignore')
@@ -160,9 +162,14 @@ def tokenize_text(text):
 
 
 def expand_contractions(text, contraction_mapping):
+    """
+    expand contractions
+    :param text: a sentence
+    :param contraction_mapping: the map
+    :return expanded snetence:
+    """
     contractions_pattern = re.compile('({})'.format('|'.join(contraction_mapping.keys())),
                                       flags=re.IGNORECASE | re.DOTALL)
-
     def expand_match(contraction):
         match = contraction.group(0)
         first_char = match[0]
@@ -177,12 +184,12 @@ def expand_contractions(text, contraction_mapping):
     return expanded_text
 
 
-from pattern.en import tag
-from nltk.corpus import wordnet as wn
-
-
-# Annotate text tokens with POS tags
 def pos_tag_text(text):
+    """
+    Annotate text tokens with POS tags
+    :param text: a sentence
+    :return: POS tagged sentence
+    """
     def penn_to_wn_tags(pos_tag):
         if pos_tag.startswith('J'):
             return wn.ADJ
@@ -202,8 +209,13 @@ def pos_tag_text(text):
     return tagged_lower_text
 
 
-# lemmatize text based on POS tags
 def lemmatize_text(text):
+    """
+    lemmatize text based on POS tags
+    :param text: a sentence
+    :return: lemmatized text
+    """
+    wnl = WordNetLemmatizer()
     pos_tagged_text = pos_tag_text(text)
     lemmatized_tokens = [wnl.lemmatize(word, pos_tag) if pos_tag
                          else word
@@ -213,7 +225,11 @@ def lemmatize_text(text):
 
 
 def remove_special_characters(text):
-    # remove numbers
+    """
+    remove special character
+    :param text: a sentence
+    :return:
+    """
     text = re.sub("\d+", "", text)
 
     tokens = tokenize_text(text)
@@ -224,13 +240,25 @@ def remove_special_characters(text):
 
 
 def remove_stopwords(text):
+    """
+    remove stopwords
+    :param text: a sentence
+    :return: stopwords removed sentence
+    """
     tokens = tokenize_text(text)
+    stopword_list = nltk.corpus.stopwords.words('english')
     filtered_tokens = [token for token in tokens if token not in stopword_list]
     filtered_text = ' '.join(filtered_tokens)
     return filtered_text
 
 
 def normalize_corpus(corpus, tokenize=False):
+    """
+    normalize corpus
+    :param corpus: a sentence
+    :param tokenize: whether to tokenize the sentence
+    :return: final result. Completely cleaned sentencem, either tokenized or not
+    """
     normalized_corpus = []
     for text in tqdm(corpus):
         text = expand_contractions(text, CONTRACTION_MAP)
@@ -244,98 +272,4 @@ def normalize_corpus(corpus, tokenize=False):
             normalized_corpus.append(text)
     return normalized_corpus
 
-
-def get_topn_tags_transform(path,topn,tag):
-    """
-    read cleaned data and transform them into one tag per row
-    1. get top n tags
-    2. expand row
-    3. to boolean
-    4. aggregate by content
-    """
-    df = pd.read_csv(path,quotechar='|',sep=',',header=None)
-    df.columns = ['title','body','tags']
-    merged = [ title + ' ' + body for title, body in zip(df.title,df.body)]
-    df_merged = pd.DataFrame({'content':merged,'tags':df.tags.copy()})
-    df_merged.tags = df_merged.tags.apply(lambda x: x.replace('<','').split('>')[:-1])
-    df_transformed = pd.DataFrame(df_merged.tags.tolist(),index=df_merged.content).stack().reset_index()[['content',0]]
-    df_transformed.columns = ['content','tags']
-    top_tags = Counter(df_transformed.tags).most_common()[:topn]
-    top_n_tags = [tag for tag, num in top_tags]
-    df_filtered = df_transformed[df_transformed.tags.apply(lambda x: x in set(top_n_tags))]
-    df_filtered.tags = [int(bool) for bool in df_filtered.tags == tag]
-    df_filtered.columns = ['content','is_{}'.format(tag)]
-    rslt = df_filtered.groupby('content')['is_{}'.format(tag)].agg(['sum']).reset_index()
-    rslt.columns = ['content','is_{}'.format(tag)]
-    return rslt, top_n_tags
-
-
-
-class ExtractAverageWordVectors(BaseEstimator,TransformerMixin):
-    def __init__(self,g_model):
-        self.g_model = g_model
-
-    def fit(self, X, y=None):
-        return self
-
-    def transform(self, X, y=None):
-        if self.g_model:
-            return self.averaged_word_vectors(X)
-
-    def averaged_word_vectors(self, tokenized_list):
-        weighted_ave = []
-
-        for sentence in tqdm(tokenized_list):
-            word_vecs = np.array([self.g_model[word] for word in sentence if word in self.g_model])
-
-            weighted_ave.append(np.sum(word_vecs, axis = 0)/len(word_vecs))
-
-        return np.array(weighted_ave)
-
-
-class ExtractTfidfAveVec(BaseEstimator,TransformerMixin):
-    def __init__(self,corpus, g_model):
-        self.corpus = corpus
-        self.g_model = g_model
-
-    def fit(self, X, y=None):
-        return self
-
-    def transform(self, X, y=None):
-        return self.ave_weighted_tfidf(X) 
-
-    def tfidf_extractor(self, ngram_range=(1,1)):
-
-        tfidf_obj = TfidfVectorizer(min_df=3, strip_accents='unicode', analyzer='word', token_pattern=r'\w{1,}', ngram_range=ngram_range, use_idf = 1, smooth_idf = 1, sublinear_tf = 1, stop_words='english')
-
-        tfidf_features = tfidf_obj.fit_transform(self.corpus)
-        
-        return tfidf_obj, tfidf_features
-
-    def tfidf_mapper(self, tfidf_obj, tfidf_features):
-        vocab = tfidf_obj.vocabulary_
-        words = vocab.keys()
-        word_tfidfs = [tfidf_features[0, vocab.get(word)] if vocab.get(word) else 0 for word in words]
-        word_tfidf_map = {word:tfidf_val for word, tfidf_val in zip(words, word_tfidfs)}
-        
-        return word_tfidf_map
-
-    def ave_weighted_tfidf(self, tokenized_list):
-        self.tokenized_list = tokenized_list
-        weighted_ave = []
-        tfidf_obj, tfidf_features = self.tfidf_extractor()
-        word_tfidf_map = self.tfidf_mapper(tfidf_obj, tfidf_features ) 
-
-        for sentence in tqdm(self.tokenized_list):
-            word_vecs =  np.array([self.g_model[word] * self.word_in_word_tfidf_map(word, word_tfidf_map)  for word in sentence if word in self.g_model])
-
-            weighted_ave.append(np.sum(word_vecs, axis = 0)/len(word_vecs))
-
-        return np.array(weighted_ave)
-    
-    def word_in_word_tfidf_map(self, word, word_tfidf_map):
-        if word in word_tfidf_map.values():
-            return word_tfidf_map[word]
-        else: 
-            return 1
 
